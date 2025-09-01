@@ -1,0 +1,16 @@
+{
+    "name": "graduation-system/email-service",
+    "description": "Graduation System with Email Notifications",
+    "type": "project",
+    "require": {
+        "phpmailer/phpmailer": "^6.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "lib/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
