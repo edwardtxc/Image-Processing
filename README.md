@@ -51,7 +51,6 @@ This system provides an end-to-end solution for graduation ceremonies, combining
 ### Frontend
 - **HTML5/CSS3**: Modern web interface
 - **JavaScript**: Interactive client-side functionality
-- **Bootstrap**: Responsive UI framework
 
 ### Computer Vision & AI
 - **OpenCV**: Real-time computer vision processing
