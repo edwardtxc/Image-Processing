@@ -4,6 +4,14 @@ import os
 from typing import Optional, List, Dict
 from datetime import datetime
 
+# Optional advanced denoising imports
+try:
+    from skimage import restoration, filters
+    from skimage.morphology import disk
+    ADVANCED_DENOISING_AVAILABLE = True
+except ImportError:
+    ADVANCED_DENOISING_AVAILABLE = False
+
 # Optional DCGAN enhancer (non-destructive). If models or torch are missing, it silently disables itself.
 class _OptionalDCGANEnhancer:
     def __init__(self, models_dir: Optional[str]):
@@ -106,7 +114,7 @@ class _OptionalDCGANEnhancer:
 
 
 class FaceRecognitionValidator:
-    def __init__(self, student_photos_dir: str = "/uploads", use_dcgan: bool = True, dcgan_models_dir: Optional[str] = None, use_dcgan_realtime: bool = False):
+    def __init__(self, student_photos_dir: str = "/uploads", use_dcgan: bool = True, dcgan_models_dir: Optional[str] = None, use_dcgan_realtime: bool = False, enable_denoising: bool = True):
         self.student_photos_dir = student_photos_dir
         self.known_faces: Dict[str, Dict] = {}
         # Cosine similarity threshold; 0.0..1.0 (higher is more similar)
@@ -117,6 +125,12 @@ class FaceRecognitionValidator:
         # Performance parameters
         self.template_size = 80  # smaller templates to speed up vector ops
         self.realtime_max_width = 640  # downscale wide frames for faster detection
+        # Denoising parameters
+        self.enable_denoising = enable_denoising
+        self.denoise_strength = 10  # h parameter for Non-local Means denoising
+        self.bilateral_d = 5  # diameter for bilateral filter (small for performance)
+        self.bilateral_sigma_color = 75
+        self.bilateral_sigma_space = 75
         # Optional DCGAN enhancer (auto-disabled if unavailable)
         if dcgan_models_dir is None:
             dcgan_models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dcgan_models')
@@ -180,6 +194,9 @@ class FaceRecognitionValidator:
             if self._dcgan_enabled_templates:
                 face_bgr = self._dcgan_enhancer.enhance_bgr_face(face_bgr)
             face_img = cv.cvtColor(face_bgr, cv.COLOR_BGR2GRAY)
+            # Apply efficient denoising before further processing
+            if self.enable_denoising:
+                face_img = self._apply_efficient_denoising(face_img)
             # Preprocess: contrast normalize (CLAHE), resize, and normalize range
             clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             face_img = clahe.apply(face_img)
@@ -220,6 +237,9 @@ class FaceRecognitionValidator:
             if self._dcgan_enabled_realtime:
                 face_bgr = self._dcgan_enhancer.enhance_bgr_face(face_bgr)
             face_img = cv.cvtColor(face_bgr, cv.COLOR_BGR2GRAY)
+            # Apply efficient denoising for real-time processing
+            if self.enable_denoising:
+                face_img = self._apply_efficient_denoising(face_img)
             clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             face_img = clahe.apply(face_img)
             face_template = cv.resize(face_img, (self.template_size, self.template_size))
@@ -379,6 +399,156 @@ class FaceRecognitionValidator:
         self._dcgan_enabled_realtime = bool(enabled and avail)
         state = 'enabled' if self._dcgan_enabled_realtime else 'disabled'
         print(f"DCGAN realtime enhancement {state}")
+
+    def _apply_efficient_denoising(self, gray_image: np.ndarray) -> np.ndarray:
+        """Apply efficient denoising optimized for performance"""
+        try:
+            image_size = gray_image.shape[0] * gray_image.shape[1]
+            
+            # Choose denoising method based on image size for optimal performance
+            if image_size < 5000:  # Very small images (< 70x70)
+                # Use bilateral filter for very small images (fastest)
+                denoised = cv.bilateralFilter(gray_image, self.bilateral_d, 
+                                            self.bilateral_sigma_color, 
+                                            self.bilateral_sigma_space)
+            elif image_size < 15000:  # Small images (< 120x120)
+                # Use optimized bilateral filter with reduced parameters
+                denoised = cv.bilateralFilter(gray_image, 3, 50, 50)
+            elif image_size < 40000:  # Medium images (< 200x200)
+                # Use fast edge-preserving denoise
+                denoised = self._fast_edge_preserving_denoise(gray_image)
+            else:  # Large images
+                # Use fastest method: guided filter approximation
+                denoised = self._guided_filter_fast(gray_image)
+            
+            return denoised
+        except Exception as e:
+            print(f"Denoising failed, using original: {e}")
+            return gray_image
+
+    def _fast_edge_preserving_denoise(self, image: np.ndarray) -> np.ndarray:
+        """Fast edge-preserving denoising for medium-sized images"""
+        try:
+            # Use morphological operations for fast noise reduction while preserving edges
+            # This is much faster than bilateral filter for larger images
+            
+            # Apply median filter to remove salt-and-pepper noise
+            denoised = cv.medianBlur(image, 3)
+            
+            # Apply morphological opening to remove small noise
+            kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
+            denoised = cv.morphologyEx(denoised, cv.MORPH_OPENING, kernel)
+            
+            # Apply gentle Gaussian blur to smooth remaining noise
+            denoised = cv.GaussianBlur(denoised, (3, 3), 0.8)
+            
+            return denoised
+        except Exception:
+            # Fallback to simple Gaussian blur
+            return cv.GaussianBlur(image, (3, 3), 1.0)
+
+    def _guided_filter_fast(self, image: np.ndarray) -> np.ndarray:
+        """Fast approximation of guided filter using OpenCV operations"""
+        try:
+            # Fast guided filter approximation using box filter
+            # This preserves edges while smoothing noise efficiently
+            
+            # Parameters for guided filter approximation
+            radius = 4
+            epsilon = 0.01
+            
+            # Convert to float
+            img_float = image.astype(np.float32) / 255.0
+            
+            # Use image as its own guide (self-guided filter)
+            guide = img_float
+            
+            # Compute mean of guide and input
+            mean_guide = cv.boxFilter(guide, cv.CV_32F, (radius*2+1, radius*2+1))
+            mean_img = cv.boxFilter(img_float, cv.CV_32F, (radius*2+1, radius*2+1))
+            
+            # Compute correlation and covariance
+            corr_guide_img = cv.boxFilter(guide * img_float, cv.CV_32F, (radius*2+1, radius*2+1))
+            cov_guide_img = corr_guide_img - mean_guide * mean_img
+            
+            # Compute variance of guide
+            mean_guide_sq = cv.boxFilter(guide * guide, cv.CV_32F, (radius*2+1, radius*2+1))
+            var_guide = mean_guide_sq - mean_guide * mean_guide
+            
+            # Compute a and b
+            a = cov_guide_img / (var_guide + epsilon)
+            b = mean_img - a * mean_guide
+            
+            # Compute mean of a and b
+            mean_a = cv.boxFilter(a, cv.CV_32F, (radius*2+1, radius*2+1))
+            mean_b = cv.boxFilter(b, cv.CV_32F, (radius*2+1, radius*2+1))
+            
+            # Compute output
+            output = mean_a * guide + mean_b
+            
+            # Convert back to uint8
+            result = np.clip(output * 255.0, 0, 255).astype(np.uint8)
+            return result
+            
+        except Exception:
+            # Fallback to fast median filter
+            return cv.medianBlur(image, 3)
+
+    def _apply_advanced_denoising(self, image: np.ndarray) -> np.ndarray:
+        """Advanced denoising methods for high-quality processing (slower)"""
+        try:
+            # Use scikit-image advanced denoising if available
+            if ADVANCED_DENOISING_AVAILABLE and len(image.shape) == 2:
+                # Estimate noise variance automatically
+                sigma_est = restoration.estimate_sigma(image)
+                
+                # Apply wavelet denoising (good quality, moderate speed)
+                denoised = restoration.denoise_wavelet(image, 
+                                                     sigma=sigma_est,
+                                                     wavelet='db1',
+                                                     mode='soft',
+                                                     rescale_sigma=True)
+                
+                # Convert back to uint8
+                denoised = (denoised * 255).astype(np.uint8)
+                return denoised
+            else:
+                # Fallback to Non-local Means denoising
+                if len(image.shape) == 3:
+                    denoised = cv.fastNlMeansDenoisingColored(image, None, 
+                                                            self.denoise_strength, 
+                                                            self.denoise_strength, 7, 21)
+                else:
+                    denoised = cv.fastNlMeansDenoising(image, None, 
+                                                      self.denoise_strength, 7, 21)
+                return denoised
+        except Exception as e:
+            print(f"Advanced denoising failed: {e}")
+            return self._apply_efficient_denoising(image)
+
+    def set_denoising_enabled(self, enabled: bool):
+        """Enable or disable denoising processing"""
+        self.enable_denoising = enabled
+        state = 'enabled' if enabled else 'disabled'
+        print(f"Face denoising {state}")
+
+    def set_denoising_strength(self, strength: int):
+        """Set denoising strength (1-30, higher = more denoising)"""
+        if 1 <= strength <= 30:
+            self.denoise_strength = strength
+            print(f"Denoising strength set to {strength}")
+        else:
+            print("Denoising strength must be between 1 and 30")
+
+    def get_denoising_stats(self) -> Dict:
+        """Get current denoising configuration"""
+        return {
+            'enabled': self.enable_denoising,
+            'strength': self.denoise_strength,
+            'bilateral_d': self.bilateral_d,
+            'bilateral_sigma_color': self.bilateral_sigma_color,
+            'bilateral_sigma_space': self.bilateral_sigma_space
+        }
 
 
 class FaceRecognitionUI:
