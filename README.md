@@ -86,7 +86,7 @@ This system provides an end-to-end solution for graduation ceremonies, combining
 ### 1. Start Web Server
 ```bash
 # Using PHP built-in server (development)
-php -S localhost:8080
+php -S localhost:8000
 
 # Or configure your web server to serve the project root
 
