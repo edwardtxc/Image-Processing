@@ -656,6 +656,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             alert('Choose only one method for fingerprint: upload OR capture.');
         }
     });
+
+    // Convert student ID to lowercase
+    var studentIdInput = document.querySelector('input[name="student_id"]');
+    if (studentIdInput) {
+        studentIdInput.addEventListener('input', function() {
+            this.value = this.value.toLowerCase();
+        });
+    }
 })();
 </script>
 
